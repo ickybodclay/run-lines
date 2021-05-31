@@ -59,7 +59,7 @@
     <string name="alert_script_export_error">Error: script did not export</string>
     <string name="alert_script_import_error">Error: invalid script file</string>
     <string name="tts_settings">TTS Settings</string>
-    <string name="speech_rate">Speech rate: %s</string>
+    <string name="speech_rate">Speech rate: %f</string>
     <string name="toggle_settings">Toggle lines</string>
     <string name="edit_settings">Edit script</string>
     <string-array name="edit_line_options">
