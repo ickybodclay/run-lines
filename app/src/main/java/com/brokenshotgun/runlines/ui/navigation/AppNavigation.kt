@@ -7,7 +7,6 @@ import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.ui.NavDisplay
 import com.brokenshotgun.runlines.data.ScriptReaderDbHelper
-import com.brokenshotgun.runlines.ui.screens.EditSceneScreen
 import com.brokenshotgun.runlines.ui.screens.HomeScreen
 import com.brokenshotgun.runlines.ui.screens.ReadSceneScreen
 import com.brokenshotgun.runlines.ui.screens.ScriptListScreen
@@ -24,8 +23,6 @@ sealed interface AppRoute : NavKey {
     @Serializable
     data class ReadScene(val scriptId: Long, val sceneIndex: Int) : AppRoute
 
-    @Serializable
-    data class EditScene(val scriptId: Long, val sceneIndex: Int) : AppRoute
 }
 
 @Composable
@@ -77,25 +74,13 @@ fun AppNavigation(
                         if (backStack.size > 1) {
                             backStack.removeLastOrNull()
                         }
+                    },
+                    onSaveScript = { updatedScript ->
+                        dbHelper.updateScript(updatedScript)
                     }
                 )
             }
 
-            entry<AppRoute.EditScene> { key ->
-                val script = dbHelper.getScripts().find { it.id == key.scriptId } ?: return@entry
-                EditSceneScreen(
-                    script = script,
-                    sceneIndex = key.sceneIndex,
-                    onSave = { updatedScript ->
-                        dbHelper.updateScript(updatedScript)
-                    },
-                    onBack = {
-                        if (backStack.size > 1) {
-                            backStack.removeLastOrNull()
-                        }
-                    }
-                )
-            }
         }
     )
 }

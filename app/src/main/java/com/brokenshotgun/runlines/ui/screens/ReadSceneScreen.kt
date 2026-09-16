@@ -2,17 +2,24 @@ package com.brokenshotgun.runlines.ui.screens
 
 import android.speech.tts.TextToSpeech
 import android.util.Log
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Redo
+import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -27,6 +34,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.brokenshotgun.runlines.model.Actor
 import com.brokenshotgun.runlines.model.Line
+import com.brokenshotgun.runlines.model.Scene
 import com.brokenshotgun.runlines.model.Script
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -34,21 +42,122 @@ import com.brokenshotgun.runlines.model.Script
 fun ReadSceneScreen(
     script: Script,
     sceneIndex: Int,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onSaveScript: (Script) -> Unit = {}
 ) {
+    var scriptState by remember(script.id, script.name, script.scenes.size) {
+        mutableStateOf(script)
+    }
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val safeSceneIndex = sceneIndex.coerceIn(0, script.scenes.lastIndex.coerceAtLeast(0))
-    var selectedSceneIndex by remember(script.scenes.size, safeSceneIndex) {
+    val safeSceneIndex = sceneIndex.coerceIn(0, scriptState.scenes.lastIndex.coerceAtLeast(0))
+    var selectedSceneIndex by remember(scriptState.scenes.size, safeSceneIndex) {
         mutableIntStateOf(safeSceneIndex)
     }
-    val currentScene = script.scenes.getOrNull(selectedSceneIndex) ?: script.scenes.firstOrNull() ?: return
+    val currentScene = scriptState.scenes.getOrNull(selectedSceneIndex) ?: scriptState.scenes.firstOrNull() ?: return
 
     var textToSpeech by remember { mutableStateOf<TextToSpeech?>(null) }
     var currentLineIndex by remember { mutableIntStateOf(-1) }
     var isPlaying by remember { mutableStateOf(false) }
     var stopAtSceneEnd by remember { mutableStateOf(false) }
     var menuExpanded by remember { mutableStateOf(false) }
+    var unsavedChanges by remember { mutableStateOf(false) }
+    var showExitDialog by remember { mutableStateOf(false) }
+    var editingLineIndex by remember { mutableStateOf<Int?>(null) }
+    var editingActorName by remember { mutableStateOf("") }
+    var editingLineText by remember { mutableStateOf("") }
+    var originalEditingActorName by remember { mutableStateOf("") }
+    var originalEditingLineText by remember { mutableStateOf("") }
+    val maxHistoryActions = 500
+    var sceneUndoStack by remember(selectedSceneIndex) { mutableStateOf<List<List<Line>>>(emptyList()) }
+    var sceneRedoStack by remember(selectedSceneIndex) { mutableStateOf<List<List<Line>>>(emptyList()) }
+
+    fun pushUndoState(snapshot: List<Line>) {
+        sceneUndoStack = (sceneUndoStack + listOf(snapshot)).takeLast(maxHistoryActions)
+        if (sceneUndoStack.size > maxHistoryActions) {
+            sceneUndoStack = sceneUndoStack.takeLast(maxHistoryActions)
+        }
+    }
+
+    fun snapshotSceneLines(scene: Scene): List<Line> {
+        return scene.lines.map { it.copy(actor = it.actor, line = it.line, order = it.order, characterExtensions = it.characterExtensions.toMutableList()) }
+    }
+
+    fun applySceneLines(scene: Scene, lines: List<Line>) {
+        scene.lines.clear()
+        scene.lines.addAll(lines.map { it.copy(actor = it.actor, line = it.line, order = it.order, characterExtensions = it.characterExtensions.toMutableList()) })
+    }
+
+    fun resetSceneEditHistory() {
+        sceneUndoStack = emptyList()
+        sceneRedoStack = emptyList()
+    }
+
+    fun cloneScriptState(): Script {
+        return Script(
+            name = scriptState.name,
+            credit = scriptState.credit,
+            author = scriptState.author,
+            source = scriptState.source,
+            draftDate = scriptState.draftDate,
+            contact = scriptState.contact,
+            actors = scriptState.actors.map { it.copy() }.toMutableList(),
+            scenes = scriptState.scenes.map { scene ->
+                scene.copy(
+                    name = scene.name,
+                    number = scene.number,
+                    lines = scene.lines.map { line ->
+                        line.copy(
+                            actor = line.actor.copy(),
+                            line = line.line,
+                            order = line.order,
+                            characterExtensions = line.characterExtensions.toMutableList()
+                        )
+                    }.toMutableList()
+                )
+            }.toMutableList(),
+            allVoices = scriptState.allVoices.toMutableList(),
+            actorVoices = scriptState.actorVoices.toMutableMap(),
+            id = scriptState.id
+        ).apply {
+            defaultVoice = scriptState.defaultVoice
+        }
+    }
+
+    fun refreshScriptState() {
+        scriptState = cloneScriptState()
+    }
+
+    fun isEditingDirty(): Boolean {
+        return editingLineIndex != null && (editingActorName != originalEditingActorName || editingLineText != originalEditingLineText)
+    }
+
+    fun exitEditMode() {
+        editingLineIndex = null
+        editingActorName = ""
+        editingLineText = ""
+        originalEditingActorName = ""
+        originalEditingLineText = ""
+        unsavedChanges = false
+    }
+
+    fun saveAndLeave() {
+        onSaveScript(scriptState)
+        showExitDialog = false
+        exitEditMode()
+        onBack()
+    }
+
+    fun requestBack() {
+        if (editingLineIndex != null && isEditingDirty()) {
+            showExitDialog = true
+        } else {
+            if (editingLineIndex != null) {
+                exitEditMode()
+            }
+            onBack()
+        }
+    }
 
     fun stopPlayback() {
         textToSpeech?.stop()
@@ -56,7 +165,7 @@ fun ReadSceneScreen(
         currentLineIndex = -1
         TtsPlaybackController.setPlayingState(
             context = context,
-            title = script.name.ifBlank { "Untitled script" },
+            title = scriptState.name.ifBlank { "Untitled script" },
             sceneName = currentScene.name ?: "Untitled scene",
             playing = false,
             keepNotificationVisible = false
@@ -76,7 +185,7 @@ fun ReadSceneScreen(
     }
 
     fun estimatedSceneProgress(): Pair<Int, Int> {
-        val scene = script.scenes.getOrNull(selectedSceneIndex) ?: return 0 to 0
+        val scene = scriptState.scenes.getOrNull(selectedSceneIndex) ?: return 0 to 0
         var spokenWords = 0
         var remainingWords = 0
         val startIndex = currentLineIndex.coerceAtLeast(0)
@@ -93,7 +202,7 @@ fun ReadSceneScreen(
     }
 
     fun estimatedRemainingTimeLabel(): String {
-        val scene = script.scenes.getOrNull(selectedSceneIndex) ?: return ""
+        val scene = scriptState.scenes.getOrNull(selectedSceneIndex) ?: return ""
         if (!isPlaying) return ""
         var remainingWords = 0
         val startIndex = currentLineIndex.coerceAtLeast(0)
@@ -114,11 +223,123 @@ fun ReadSceneScreen(
         isPlaying = false
         TtsPlaybackController.setPlayingState(
             context = context,
-            title = script.name.ifBlank { "Untitled script" },
+            title = scriptState.name.ifBlank { "Untitled script" },
             sceneName = currentScene.name ?: "Untitled scene",
             playing = false,
             keepNotificationVisible = true
         )
+    }
+
+    fun renameActorAcrossScript(currentActor: Actor, newName: String) {
+        if (newName.isBlank()) return
+        val replacement = Actor(newName)
+        if (currentActor == Actor.ACTION) return
+
+        scriptState.replaceActor(currentActor, replacement)
+        val actorIndex = scriptState.actors.indexOf(currentActor)
+        if (actorIndex >= 0) {
+            scriptState.actors[actorIndex] = replacement
+        }
+        refreshScriptState()
+    }
+
+    fun beginEditingLine(lineIndex: Int) {
+        val scene = scriptState.scenes.getOrNull(selectedSceneIndex) ?: return
+        if (lineIndex !in scene.lines.indices) return
+        val line = scene.lines[lineIndex]
+        editingLineIndex = lineIndex
+        editingActorName = line.actor.name
+        editingLineText = line.line
+        originalEditingActorName = line.actor.name
+        originalEditingLineText = line.line
+        unsavedChanges = false
+    }
+
+    fun saveEditingLineChanges(lineIndex: Int, actorName: String, lineText: String) {
+        val scene = scriptState.scenes.getOrNull(selectedSceneIndex) ?: return
+        if (lineIndex !in scene.lines.indices) return
+
+        val updatedScript = cloneScriptState()
+        val updatedScene = updatedScript.scenes.getOrNull(selectedSceneIndex) ?: return
+        val currentLine = updatedScene.lines.getOrNull(lineIndex) ?: return
+        val beforeSnapshot = snapshotSceneLines(updatedScene)
+
+        if (actorName.isNotBlank() && currentLine.actor != Actor.ACTION) {
+            updatedScript.replaceActor(currentLine.actor, Actor(actorName))
+            val actorIndex = updatedScript.actors.indexOf(currentLine.actor)
+            if (actorIndex >= 0) {
+                updatedScript.actors[actorIndex] = Actor(actorName)
+            }
+        }
+        if (currentLine.line != lineText) {
+            currentLine.line = lineText
+        }
+
+        val afterSnapshot = snapshotSceneLines(updatedScene)
+        if (beforeSnapshot != afterSnapshot) {
+            pushUndoState(beforeSnapshot)
+            sceneRedoStack = emptyList()
+        }
+
+        scriptState = updatedScript
+        onSaveScript(scriptState)
+        exitEditMode()
+    }
+
+    fun undoSceneEdit() {
+        val previous = sceneUndoStack.lastOrNull() ?: return
+        val updatedScript = cloneScriptState()
+        val updatedScene = updatedScript.scenes.getOrNull(selectedSceneIndex) ?: return
+
+        sceneRedoStack = (sceneRedoStack + listOf(snapshotSceneLines(updatedScene))).takeLast(maxHistoryActions)
+        sceneUndoStack = sceneUndoStack.dropLast(1)
+
+        val newLines = previous.map { it.copy(actor = it.actor, line = it.line, order = it.order, characterExtensions = it.characterExtensions.toMutableList()) }
+        updatedScene.lines.clear()
+        updatedScene.lines.addAll(newLines)
+
+        scriptState = updatedScript
+        onSaveScript(scriptState)
+    }
+
+    fun redoSceneEdit() {
+        val next = sceneRedoStack.lastOrNull() ?: return
+        val updatedScript = cloneScriptState()
+        val updatedScene = updatedScript.scenes.getOrNull(selectedSceneIndex) ?: return
+
+        sceneUndoStack = (sceneUndoStack + listOf(snapshotSceneLines(updatedScene))).takeLast(maxHistoryActions)
+        sceneRedoStack = sceneRedoStack.dropLast(1)
+
+        val newLines = next.map { it.copy(actor = it.actor, line = it.line, order = it.order, characterExtensions = it.characterExtensions.toMutableList()) }
+        updatedScene.lines.clear()
+        updatedScene.lines.addAll(newLines)
+
+        scriptState = updatedScript
+        onSaveScript(scriptState)
+    }
+
+    fun deleteLineAndSave(lineIndex: Int) {
+        val scene = scriptState.scenes.getOrNull(selectedSceneIndex) ?: return
+        if (lineIndex !in scene.lines.indices) return
+
+        val updatedScript = cloneScriptState()
+        val updatedScene = updatedScript.scenes.getOrNull(selectedSceneIndex) ?: return
+        val beforeSnapshot = snapshotSceneLines(updatedScene)
+        pushUndoState(beforeSnapshot)
+        sceneRedoStack = emptyList()
+        updatedScene.lines.removeAt(lineIndex)
+
+        scriptState = updatedScript
+        onSaveScript(scriptState)
+        exitEditMode()
+    }
+
+    fun cancelEditingLine() {
+        if (isEditingDirty()) {
+            showExitDialog = true
+        } else {
+            exitEditMode()
+        }
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -133,9 +354,13 @@ fun ReadSceneScreen(
         }
     }
 
+    BackHandler {
+        requestBack()
+    }
+
     fun speakLineAt(targetSceneIndex: Int, targetLineIndex: Int) {
-        val validSceneIndex = targetSceneIndex.coerceIn(0, script.scenes.lastIndex.coerceAtLeast(0))
-        val targetScene = script.scenes.getOrNull(validSceneIndex) ?: return
+        val validSceneIndex = targetSceneIndex.coerceIn(0, scriptState.scenes.lastIndex.coerceAtLeast(0))
+        val targetScene = scriptState.scenes.getOrNull(validSceneIndex) ?: return
 
         if (targetLineIndex < targetScene.lines.size) {
             selectedSceneIndex = validSceneIndex
@@ -151,7 +376,7 @@ fun ReadSceneScreen(
         }
 
         val nextSceneIndex = validSceneIndex + 1
-        if (nextSceneIndex < script.scenes.size) {
+        if (nextSceneIndex < scriptState.scenes.size) {
             speakLineAt(nextSceneIndex, 0)
         } else {
             stopPlayback()
@@ -166,7 +391,7 @@ fun ReadSceneScreen(
             val startIndex = if (currentLineIndex == -1) 0 else currentLineIndex
             TtsPlaybackController.setPlayingState(
                 context = context,
-                title = script.name.ifBlank { "Untitled script" },
+                title = scriptState.name.ifBlank { "Untitled script" },
                 sceneName = currentScene.name ?: "Untitled scene",
                 playing = true,
                 progressMaxWords = currentScene.lines.sumOf { wordCount(it.line) },
@@ -177,13 +402,17 @@ fun ReadSceneScreen(
         }
     }
 
+    LaunchedEffect(script) {
+        scriptState = script
+    }
+
     LaunchedEffect(selectedSceneIndex, currentLineIndex, isPlaying, currentScene.name) {
         val (totalWords, spokenWords) = estimatedSceneProgress()
         TtsPlaybackController.setPlayingState(
             context = context,
-            title = script.name.ifBlank { "Untitled script" },
+            title = scriptState.name.ifBlank { "Untitled script" },
             sceneName = currentScene.name ?: "Untitled scene",
-            scriptId = script.id,
+            scriptId = scriptState.id,
             sceneIndex = selectedSceneIndex,
             playing = isPlaying,
             keepNotificationVisible = !isPlaying && currentLineIndex >= 0,
@@ -193,11 +422,11 @@ fun ReadSceneScreen(
         )
     }
 
-    LaunchedEffect(selectedSceneIndex, script.id, isPlaying) {
+    LaunchedEffect(selectedSceneIndex, scriptState.id, isPlaying) {
         TtsPlaybackController.bindPlayback(
-            title = script.name.ifBlank { "Untitled script" },
+            title = scriptState.name.ifBlank { "Untitled script" },
             sceneName = currentScene.name ?: "Untitled scene",
-            scriptId = script.id,
+            scriptId = scriptState.id,
             sceneIndex = selectedSceneIndex,
             playing = isPlaying,
             onToggle = { togglePlayback() },
@@ -217,12 +446,12 @@ fun ReadSceneScreen(
         textToSpeech?.setOnUtteranceProgressListener(ReadSceneTTSListener {
             if (isPlaying) {
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    val activeScene = script.scenes.getOrNull(selectedSceneIndex) ?: return@post
+                    val activeScene = scriptState.scenes.getOrNull(selectedSceneIndex) ?: return@post
                     if (currentLineIndex + 1 < activeScene.lines.size) {
                         speakLineAt(selectedSceneIndex, currentLineIndex + 1)
                     } else if (!stopAtSceneEnd) {
                         val nextSceneIndex = selectedSceneIndex + 1
-                        if (nextSceneIndex < script.scenes.size) {
+                        if (nextSceneIndex < scriptState.scenes.size) {
                             speakLineAt(nextSceneIndex, 0)
                         } else {
                             stopPlayback()
@@ -238,16 +467,36 @@ fun ReadSceneScreen(
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
-                title = { Text(text = script.name.ifBlank { "Untitled script" }) },
+                title = { Text(text = scriptState.name.ifBlank { "Untitled script" }) },
                 navigationIcon = {
-                    IconButton(onClick = {
-                        stopPlayback()
-                        onBack()
-                    }) {
+                    IconButton(onClick = { requestBack() }) {
                         Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
+                    val canUndo = sceneUndoStack.isNotEmpty()
+                    val canRedo = sceneRedoStack.isNotEmpty()
+
+                    IconButton(
+                        onClick = { undoSceneEdit() },
+                        enabled = canUndo
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Undo,
+                            contentDescription = "Undo edit",
+                            tint = if (canUndo) LocalContentColor.current else LocalContentColor.current.copy(alpha = 0.38f)
+                        )
+                    }
+                    IconButton(
+                        onClick = { redoSceneEdit() },
+                        enabled = canRedo
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Redo,
+                            contentDescription = "Redo edit",
+                            tint = if (canRedo) LocalContentColor.current else LocalContentColor.current.copy(alpha = 0.38f)
+                        )
+                    }
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(imageVector = Icons.Default.MoreVert, contentDescription = "Scene options")
                     }
@@ -295,7 +544,7 @@ fun ReadSceneScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(bottom = 12.dp)
                 ) {
-                    itemsIndexed(script.scenes) { index, scene ->
+                    itemsIndexed(scriptState.scenes) { index, scene ->
                         val selected = index == selectedSceneIndex
                         FilterChip(
                             selected = selected,
@@ -305,8 +554,10 @@ fun ReadSceneScreen(
                                 }
                                 selectedSceneIndex = index
                                 currentLineIndex = -1
+                                editingLineIndex = null
+                                resetSceneEditHistory()
                             },
-                            label = { 
+                            label = {
                                 Text(
                                     text = "Scene ${index + 1}${scene.name?.let { " • ${it}" } ?: ""}",
                                     maxLines = 1
@@ -328,24 +579,92 @@ fun ReadSceneScreen(
             }
 
             itemsIndexed(currentScene.lines) { index, line ->
-                LineReadItem(
+                LineEditRow(
                     line = line,
                     isSelected = index == currentLineIndex,
+                    isEditing = editingLineIndex == index,
+                    editingActorName = if (editingLineIndex == index) editingActorName else line.actor.name,
+                    editingLineText = if (editingLineIndex == index) editingLineText else line.line,
                     onClick = {
                         if (isPlaying) {
                             speakLineAt(selectedSceneIndex, index)
                         } else {
                             currentLineIndex = index
                         }
+                    },
+                    onLongClick = {
+                        beginEditingLine(index)
+                    },
+                    onActorValueChange = {
+                        editingActorName = it
+                    },
+                    onLineValueChange = {
+                        editingLineText = it
+                    },
+                    onSave = {
+                        saveEditingLineChanges(index, editingActorName, editingLineText)
+                        currentLineIndex = index
+                    },
+                    onCancel = {
+                        cancelEditingLine()
+                    },
+                    onDelete = {
+                        deleteLineAndSave(index)
                     }
                 )
             }
         }
     }
+
+    if (showExitDialog) {
+        AlertDialog(
+            onDismissRequest = { showExitDialog = false },
+            title = { Text("Unsaved changes") },
+            text = { Text("You have edits that haven't been saved. Save them before leaving or discard them.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (editingLineIndex != null) {
+                        saveEditingLineChanges(editingLineIndex!!, editingActorName, editingLineText)
+                    }
+                    showExitDialog = false
+                    onBack()
+                }) {
+                    Text("Save & leave")
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        showExitDialog = false
+                        exitEditMode()
+                        onBack()
+                    }) {
+                        Text("Discard")
+                    }
+                    TextButton(onClick = { showExitDialog = false }) {
+                        Text("Keep editing")
+                    }
+                }
+            }
+        )
+    }
 }
 
 @Composable
-fun LineReadItem(line: Line, isSelected: Boolean, onClick: () -> Unit) {
+fun LineEditRow(
+    line: Line,
+    isSelected: Boolean,
+    isEditing: Boolean,
+    editingActorName: String,
+    editingLineText: String,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onActorValueChange: (String) -> Unit,
+    onLineValueChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit
+) {
     val isActionLine = line.actor == Actor.ACTION
 
     Column(
@@ -357,31 +676,79 @@ fun LineReadItem(line: Line, isSelected: Boolean, onClick: () -> Unit) {
                     shape = MaterialTheme.shapes.medium
                 ) else Modifier
             )
-            .clickable { onClick() }
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
             .padding(horizontal = 12.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        if (!isActionLine) {
-            Text(
-                text = line.actor.name.uppercase(),
-                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center,
-                letterSpacing = 0.5.sp,
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
+        if (isEditing) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = editingActorName,
+                    onValueChange = onActorValueChange,
+                    label = { Text("Character") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = editingLineText,
+                    onValueChange = onLineValueChange,
+                    label = { Text("Line") },
+                    minLines = 2,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = onCancel) {
+                        Text("Cancel")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = onDelete,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError
+                        )
+                    ) {
+                        Text("Delete")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(onClick = onSave) {
+                        Text("Save")
+                    }
+                }
+            }
+        } else {
+            if (!isActionLine) {
+                Text(
+                    text = line.actor.name.uppercase(),
+                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    letterSpacing = 0.5.sp,
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
 
-        if (line.line.isNotBlank()) {
-            Text(
-                text = line.line,
-                color = MaterialTheme.colorScheme.onSurface,
-                textAlign = TextAlign.Center,
-                style = if (isActionLine) MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium) else MaterialTheme.typography.bodyLarge,
-                lineHeight = 24.sp,
-                modifier = Modifier.fillMaxWidth()
-            )
+            if (line.line.isNotBlank()) {
+                Text(
+                    text = line.line,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    textAlign = TextAlign.Center,
+                    style = if (isActionLine) MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium) else MaterialTheme.typography.bodyLarge,
+                    lineHeight = 24.sp,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
     }
 }
