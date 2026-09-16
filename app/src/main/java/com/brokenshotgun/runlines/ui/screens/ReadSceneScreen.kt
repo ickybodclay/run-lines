@@ -15,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -248,9 +249,9 @@ fun ReadSceneScreen(
         if (lineIndex !in scene.lines.indices) return
         val line = scene.lines[lineIndex]
         editingLineIndex = lineIndex
-        editingActorName = line.actor.name
+        editingActorName = line.actor.name.uppercase()
         editingLineText = line.line
-        originalEditingActorName = line.actor.name
+        originalEditingActorName = line.actor.name.uppercase()
         originalEditingLineText = line.line
         unsavedChanges = false
     }
@@ -263,12 +264,19 @@ fun ReadSceneScreen(
         val updatedScene = updatedScript.scenes.getOrNull(selectedSceneIndex) ?: return
         val currentLine = updatedScene.lines.getOrNull(lineIndex) ?: return
         val beforeSnapshot = snapshotSceneLines(updatedScene)
+        val normalizedActorName = actorName.trim().uppercase()
 
-        if (actorName.isNotBlank() && currentLine.actor != Actor.ACTION) {
-            updatedScript.replaceActor(currentLine.actor, Actor(actorName))
-            val actorIndex = updatedScript.actors.indexOf(currentLine.actor)
-            if (actorIndex >= 0) {
-                updatedScript.actors[actorIndex] = Actor(actorName)
+        if (normalizedActorName.isNotBlank()) {
+            val existingActor = updatedScript.actors.firstOrNull { it.name.equals(normalizedActorName, ignoreCase = true) }
+            val targetActor = existingActor ?: Actor(normalizedActorName).also { updatedScript.actors.add(it) }
+
+            if (currentLine.actor == Actor.ACTION) {
+                currentLine.actor = targetActor
+            } else if (!currentLine.actor.name.equals(targetActor.name, ignoreCase = true)) {
+                updatedScript.replaceActor(currentLine.actor, targetActor)
+                currentLine.actor = targetActor
+            } else {
+                currentLine.actor = targetActor
             }
         }
         if (currentLine.line != lineText) {
@@ -332,6 +340,17 @@ fun ReadSceneScreen(
         scriptState = updatedScript
         onSaveScript(scriptState)
         exitEditMode()
+    }
+
+    fun addNewLineToBottom() {
+        val updatedScript = cloneScriptState()
+        val updatedScene = updatedScript.scenes.getOrNull(selectedSceneIndex) ?: return
+        val newLine = Line(Actor.ACTION, "")
+        updatedScene.lines.add(newLine)
+        val newIndex = updatedScene.lines.lastIndex
+        scriptState = updatedScript
+        beginEditingLine(newIndex)
+        onSaveScript(scriptState)
     }
 
     fun cancelEditingLine() {
@@ -522,13 +541,27 @@ fun ReadSceneScreen(
             )
         },
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = { togglePlayback() }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = "Play/Pause"
-                )
+                FloatingActionButton(
+                    onClick = { addNewLineToBottom() }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "Add line"
+                    )
+                }
+
+                FloatingActionButton(
+                    onClick = { togglePlayback() }
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = "Play/Pause"
+                    )
+                }
             }
         }
     ) { padding ->
@@ -536,7 +569,7 @@ fun ReadSceneScreen(
             modifier = Modifier
                 .padding(padding)
                 .fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
+            contentPadding = PaddingValues(start = 20.dp, top = 12.dp, end = 20.dp, bottom = 120.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             item {
@@ -583,8 +616,13 @@ fun ReadSceneScreen(
                     line = line,
                     isSelected = index == currentLineIndex,
                     isEditing = editingLineIndex == index,
-                    editingActorName = if (editingLineIndex == index) editingActorName else line.actor.name,
+                    editingActorName = if (editingLineIndex == index) editingActorName else line.actor.name.uppercase(),
                     editingLineText = if (editingLineIndex == index) editingLineText else line.line,
+                    characterSuggestions = scriptState.actors
+                        .map { it.name }
+                        .filter { it != Actor.ACTION_NAME }
+                        .distinct()
+                        .sorted(),
                     onClick = {
                         if (isPlaying) {
                             speakLineAt(selectedSceneIndex, index)
@@ -596,7 +634,7 @@ fun ReadSceneScreen(
                         beginEditingLine(index)
                     },
                     onActorValueChange = {
-                        editingActorName = it
+                        editingActorName = it.uppercase()
                     },
                     onLineValueChange = {
                         editingLineText = it
@@ -650,6 +688,7 @@ fun ReadSceneScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LineEditRow(
     line: Line,
@@ -657,6 +696,7 @@ fun LineEditRow(
     isEditing: Boolean,
     editingActorName: String,
     editingLineText: String,
+    characterSuggestions: List<String>,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onActorValueChange: (String) -> Unit,
@@ -666,6 +706,15 @@ fun LineEditRow(
     onDelete: () -> Unit
 ) {
     val isActionLine = line.actor == Actor.ACTION
+    var expanded by remember { mutableStateOf(false) }
+    val matchingSuggestions = remember(editingActorName, characterSuggestions) {
+        val query = editingActorName.trim()
+        if (query.isBlank()) {
+            characterSuggestions
+        } else {
+            characterSuggestions.filter { it.contains(query, ignoreCase = true) }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -688,13 +737,40 @@ fun LineEditRow(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                OutlinedTextField(
-                    value = editingActorName,
-                    onValueChange = onActorValueChange,
-                    label = { Text("Character") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                ExposedDropdownMenuBox(
+                    expanded = expanded && matchingSuggestions.isNotEmpty(),
+                    onExpandedChange = { expanded = !expanded }
+                ) {
+                    OutlinedTextField(
+                        value = editingActorName,
+                        onValueChange = {
+                            expanded = true
+                            onActorValueChange(it)
+                        },
+                        label = { Text("Character") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(),
+                        trailingIcon = {
+                            ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
+                        }
+                    )
+                    ExposedDropdownMenu(
+                        expanded = expanded && matchingSuggestions.isNotEmpty(),
+                        onDismissRequest = { expanded = false }
+                    ) {
+                        matchingSuggestions.forEach { suggestion ->
+                            DropdownMenuItem(
+                                text = { Text(suggestion) },
+                                onClick = {
+                                    onActorValueChange(suggestion)
+                                    expanded = false
+                                }
+                            )
+                        }
+                    }
+                }
                 OutlinedTextField(
                     value = editingLineText,
                     onValueChange = onLineValueChange,
