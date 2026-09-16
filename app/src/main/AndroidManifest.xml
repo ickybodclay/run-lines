@@ -30,6 +30,8 @@
         </intent>
     </queries>
 
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -38,6 +40,10 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
+
+        <receiver
+            android:name=".ui.screens.TtsPlaybackReceiver"
+            android:exported="false" />
 
         <activity
             android:name=".MainActivity"
@@ -56,23 +62,6 @@
             </intent-filter>
 
         </activity>
-
-        <activity
-            android:name=".ReadSceneActivity"
-            android:exported="false"
-            android:label="@string/title_activity_read_script"
-            android:theme="@style/AppTheme.NoActionBar" />
-        <activity
-            android:name=".EditSceneActivity"
-            android:exported="false"
-            android:label="@string/title_activity_edit_script"
-            android:screenOrientation="portrait"
-            android:theme="@style/AppTheme.NoActionBar" />
-        <activity
-            android:name=".ScriptSceneListActivity"
-            android:exported="false"
-            android:label="@string/title_activity_script_scene_list"
-            android:theme="@style/AppTheme.NoActionBar" />
     </application>
 
 </manifest>

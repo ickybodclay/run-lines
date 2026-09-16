@@ -41,7 +41,7 @@ public class PdfParserTest {
         File file = new File(resource.getPath());
         String testScriptStr = convertStreamToString(new FileInputStream(file));
 
-        Script result = PdfParser.parse(testScriptStr);
+        Script result = PdfParser.INSTANCE.parse(testScriptStr);
         assertNotNull(result);
 
         Gson gson = new GsonBuilder().setPrettyPrinting().create();

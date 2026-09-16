@@ -121,7 +121,7 @@ object FountainSerializer {
         builder.append("\n\n")
 
         for (scene in script.scenes) {
-            var sceneName = scene.name.uppercase(Locale.getDefault())
+            var sceneName = scene.name?.uppercase(Locale.getDefault()) ?: "Untitled"
             if (!sceneName.startsWith("INT.") && !sceneName.startsWith("EXT.")) {
                 sceneName = ".$sceneName"
             }
@@ -144,20 +144,7 @@ object FountainSerializer {
         val titleTokens = parseTitlePageOfString(getScriptTitlePage(script))
         val bodyTokens = parseBodyOfString(getScriptBody(script))
 
-        /*
-        // for debugging only
-        println("##### all tokens for Script #####")
-        println(titleTokens)
-        for(token in bodyTokens) {
-            println("[isCentered=${token.isCentered}, " +
-                    "sceneNumber=${token.sceneNumber}, " +
-                    "isDualDialogue=${token.isDualDialogue}, " +
-                    "sectionDepth=${token.sectionDepth}]\t" +
-                    "<${token.elementType}>${token.elementText}</${token.elementType}>")
-        }
-        */
-
-        return Script(titleTokens, bodyTokens)
+        return Script.createFromTokens(titleTokens, bodyTokens)
     }
 
     private fun parseBodyOfString(scriptBody: String) : Array<FNElement> {

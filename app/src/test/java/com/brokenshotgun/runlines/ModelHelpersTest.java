@@ -16,6 +16,7 @@
 
 package com.brokenshotgun.runlines;
 
+import com.brokenshotgun.runlines.model.Actor;
 import com.brokenshotgun.runlines.model.Line;
 
 import org.junit.Test;
@@ -24,30 +25,32 @@ import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.assertThat;
 
 public class ModelHelpersTest {
+    private static final Actor TEST_ACTOR = new Actor("TEST");
+
     @Test
     public void testLineHtmlBold() {
-        Line testLine = new Line(null, "my **bold** text is **great**");
+        Line testLine = new Line(TEST_ACTOR, "my **bold** text is **great**");
         String expected = "my <b>bold</b> text is <b>great</b>";
         assertThat(testLine.getLineHtml(), is(expected));
     }
 
     @Test
     public void testLineHtmlItalics() {
-        Line testLine = new Line(null, "my *italics* text is *great*");
+        Line testLine = new Line(TEST_ACTOR, "my *italics* text is *great*");
         String expected = "my <i>italics</i> text is <i>great</i>";
         assertThat(testLine.getLineHtml(), is(expected));
     }
 
     @Test
     public void testLineHtmlUnderline() {
-        Line testLine = new Line(null, "my _underlined_ text is _great_");
+        Line testLine = new Line(TEST_ACTOR, "my _underlined_ text is _great_");
         String expected = "my <u>underlined</u> text is <u>great</u>";
         assertThat(testLine.getLineHtml(), is(expected));
     }
 
     @Test
     public void testLineHtmlCombinedEmphasis() {
-        Line testLine = new Line(null, "For example, ***bold italics,*** or _an *italicized* word within an underlined phrase_");
+        Line testLine = new Line(TEST_ACTOR, "For example, ***bold italics,*** or _an *italicized* word within an underlined phrase_");
         String expected = "For example, <i><b>bold italics,</b></i> or <u>an <i>italicized</i> word within an underlined phrase</u>";
         assertThat(testLine.getLineHtml(), is(expected));
     }
