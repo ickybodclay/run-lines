@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -30,6 +31,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -62,6 +65,9 @@ fun ReadSceneScreen(
     var isPlaying by remember { mutableStateOf(false) }
     var stopAtSceneEnd by remember { mutableStateOf(false) }
     var menuExpanded by remember { mutableStateOf(false) }
+    var showVoiceDialog by remember { mutableStateOf(false) }
+    var voiceDialogCharacters by remember { mutableStateOf<List<VoiceAssignment>>(emptyList()) }
+    var voiceDialogOptions by remember { mutableStateOf<List<String>>(emptyList()) }
     var unsavedChanges by remember { mutableStateOf(false) }
     var showExitDialog by remember { mutableStateOf(false) }
     var editingLineIndex by remember { mutableStateOf<Int?>(null) }
@@ -353,6 +359,149 @@ fun ReadSceneScreen(
         onSaveScript(scriptState)
     }
 
+    fun getAllTtsVoices(): List<android.speech.tts.Voice> {
+        return try {
+            textToSpeech?.voices?.toList() ?: emptyList()
+        } catch (_: IllegalStateException) {
+            emptyList()
+        }
+    }
+
+    fun getPlayableTtsVoices(): List<String> {
+        val allVoices = getAllTtsVoices()
+        return allVoices
+            .asSequence()
+            .filter { voice ->
+                val locale = voice.locale
+                !voice.name.isNullOrBlank() &&
+                    locale != null &&
+                    !voice.isNetworkConnectionRequired
+            }
+            .mapNotNull { it.name }
+            .distinct()
+            .sortedWith(compareBy<String> { voiceName ->
+                val voiceLocale = allVoices.firstOrNull { it.name == voiceName }?.locale
+                val localeKey = voiceLocale?.language ?: ""
+                if (localeKey == "en") 0 else 1
+            }.thenBy { it.lowercase() })
+            .toList()
+    }
+
+    fun getPreferredDefaultTtsVoice(): String? {
+        val playableVoices = getPlayableTtsVoices()
+        val allVoices = getAllTtsVoices()
+        val firstEnUsVoice = playableVoices.firstOrNull { voiceName ->
+            val locale = allVoices.firstOrNull { it.name == voiceName }?.locale
+            locale != null && locale.language == "en" && locale.country == "US"
+        }
+        val resolvedDefault = scriptState.defaultVoice?.takeIf { it.isNotBlank() && it != "Default" }
+            ?: firstEnUsVoice
+            ?: playableVoices.firstOrNull()
+        if (!resolvedDefault.isNullOrBlank()) {
+            scriptState.defaultVoice = resolvedDefault
+        }
+        return resolvedDefault
+    }
+
+    fun resolveVoiceChoiceForLine(line: Line): String? {
+        val actorName = line.actor.name
+        val configuredVoice = scriptState.actorVoices[actorName.uppercase()]
+            ?: scriptState.actorVoices[actorName]
+            ?: scriptState.getVoice(actorName)
+        return when {
+            configuredVoice.isNullOrBlank() || configuredVoice.equals("Default", ignoreCase = true) -> getPreferredDefaultTtsVoice()
+            else -> configuredVoice
+        }
+    }
+
+    fun openCharacterVoiceDialog() {
+        val playableVoices = getPlayableTtsVoices()
+        val fallbackVoices = scriptState.allVoices
+            .filter { it.isNotBlank() && it != "Default" }
+            .filter { playableVoices.contains(it) || it == scriptState.defaultVoice }
+        val allVoices = getAllTtsVoices()
+        val availableVoices = (playableVoices + fallbackVoices + listOfNotNull(scriptState.defaultVoice))
+            .distinct()
+            .filter { it.isNotBlank() && it != "Default" }
+            .sortedWith(compareBy<String> { voiceName ->
+                val voiceLocale = allVoices.firstOrNull { it.name == voiceName }?.locale
+                val localeKey = voiceLocale?.language ?: ""
+                if (localeKey == "en") 0 else 1
+            }.thenBy { it.lowercase() })
+        voiceDialogOptions = listOf("Default") + availableVoices
+        voiceDialogCharacters = scriptState.actors
+            .filter { it != Actor.ACTION }
+            .map { actor ->
+                val configuredVoice = scriptState.actorVoices[actor.name.uppercase()]
+                    ?: scriptState.actorVoices[actor.name]
+                    ?: scriptState.getVoice(actor.name)
+                VoiceAssignment(
+                    name = actor.name.uppercase(),
+                    selectedVoice = when {
+                        configuredVoice.isNullOrBlank() -> "Default"
+                        configuredVoice.equals("Default", ignoreCase = true) -> "Default"
+                        else -> configuredVoice
+                    },
+                    enabled = true
+                )
+            }
+        showVoiceDialog = true
+    }
+
+    fun saveCharacterVoiceDialog() {
+        val updatedScript = cloneScriptState()
+        val currentNames = updatedScript.actors.filter { it != Actor.ACTION }.map { it.name.uppercase() }.toSet()
+
+        val incomingNames = voiceDialogCharacters
+            .filter { it.enabled && it.name.isNotBlank() }
+            .map { it.name.uppercase() }
+            .toSet()
+
+        val removedNames = currentNames - incomingNames
+        removedNames.forEach { removedName ->
+            val actorToRemove = updatedScript.actors.firstOrNull { it.name.uppercase() == removedName } ?: return@forEach
+            updatedScript.actors.remove(actorToRemove)
+            updatedScript.actorVoices.remove(removedName)
+            updatedScript.scenes.forEach { scene ->
+                scene.lines.forEach { line ->
+                    if (line.actor.name.uppercase() == removedName) {
+                        line.actor = Actor.ACTION
+                    }
+                }
+            }
+        }
+
+        voiceDialogCharacters.filter { it.enabled && it.name.isNotBlank() }.forEach { assignment ->
+            val normalizedName = assignment.name.uppercase()
+            val actor = updatedScript.actors.firstOrNull { it.name.uppercase() == normalizedName }
+                ?: Actor(normalizedName).also { updatedScript.actors.add(it) }
+            val resolvedSelection = assignment.selectedVoice.trim()
+            if (resolvedSelection.isBlank() || resolvedSelection.equals("Default", ignoreCase = true)) {
+                updatedScript.actorVoices.remove(normalizedName)
+            } else {
+                updatedScript.actorVoices[normalizedName] = resolvedSelection
+            }
+        }
+
+        val firstEnUsVoice = textToSpeech?.voices
+            ?.firstOrNull { voice ->
+                val locale = voice.locale
+                locale != null && locale.language == "en" && locale.country == "US"
+            }
+            ?.name
+        if (!firstEnUsVoice.isNullOrBlank()) {
+            updatedScript.defaultVoice = firstEnUsVoice
+        }
+
+        scriptState = updatedScript
+        onSaveScript(scriptState)
+        showVoiceDialog = false
+    }
+
+    fun cancelCharacterVoiceDialog() {
+        showVoiceDialog = false
+    }
+
     fun cancelEditingLine() {
         if (isEditingDirty()) {
             showExitDialog = true
@@ -385,6 +534,13 @@ fun ReadSceneScreen(
             selectedSceneIndex = validSceneIndex
             currentLineIndex = targetLineIndex
             val line = targetScene.lines[targetLineIndex]
+            val selectedVoiceName = resolveVoiceChoiceForLine(line)
+            if (!selectedVoiceName.isNullOrBlank()) {
+                val matchingVoice = textToSpeech?.voices?.firstOrNull { it.name == selectedVoiceName }
+                if (matchingVoice != null) {
+                    textToSpeech?.voice = matchingVoice
+                }
+            }
             textToSpeech?.speak(line.line, TextToSpeech.QUEUE_FLUSH, null, "scene_${validSceneIndex}_line_$targetLineIndex")
             return
         }
@@ -462,6 +618,19 @@ fun ReadSceneScreen(
     }
 
     LaunchedEffect(textToSpeech) {
+        val playableVoices = getPlayableTtsVoices()
+        val filteredLegacyVoices = scriptState.allVoices
+            .filter { it.isNotBlank() && it != "Default" }
+            .filter { playableVoices.contains(it) || it == scriptState.defaultVoice }
+        val allVoices = getAllTtsVoices()
+        voiceDialogOptions = listOf("Default") + (playableVoices + filteredLegacyVoices + listOfNotNull(scriptState.defaultVoice))
+            .distinct()
+            .filter { it.isNotBlank() && it != "Default" }
+            .sortedWith(compareBy<String> { voiceName ->
+                val voiceLocale = allVoices.firstOrNull { it.name == voiceName }?.locale
+                val localeKey = voiceLocale?.language ?: ""
+                if (localeKey == "en") 0 else 1
+            }.thenBy { it.lowercase() })
         textToSpeech?.setOnUtteranceProgressListener(ReadSceneTTSListener {
             if (isPlaying) {
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
@@ -534,6 +703,13 @@ fun ReadSceneScreen(
                             onClick = {
                                 stopAtSceneEnd = !stopAtSceneEnd
                                 menuExpanded = false
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Character voices") },
+                            onClick = {
+                                menuExpanded = false
+                                openCharacterVoiceDialog()
                             }
                         )
                     }
@@ -685,6 +861,175 @@ fun ReadSceneScreen(
                 }
             }
         )
+    }
+
+    if (showVoiceDialog) {
+        Dialog(
+            onDismissRequest = { cancelCharacterVoiceDialog() },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                shape = MaterialTheme.shapes.large,
+                tonalElevation = 2.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        text = "Character voices",
+                        style = MaterialTheme.typography.headlineSmall,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+
+                    val voiceOptions = voiceDialogOptions.ifEmpty { listOf("Default") }
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(bottom = 12.dp)
+                    ) {
+                        itemsIndexed(voiceDialogCharacters) { _, assignment ->
+                            CharacterVoiceEditorRow(
+                                assignment = assignment,
+                                voiceOptions = voiceOptions,
+                                onNameChange = { newName ->
+                                    val updated = voiceDialogCharacters.map {
+                                        if (it === assignment) it.copy(name = newName.uppercase()) else it
+                                    }
+                                    voiceDialogCharacters = updated
+                                },
+                                onVoiceChange = { newVoice ->
+                                    val updated = voiceDialogCharacters.map {
+                                        if (it === assignment) it.copy(selectedVoice = newVoice) else it
+                                    }
+                                    voiceDialogCharacters = updated
+                                },
+                                onRemove = {
+                                    voiceDialogCharacters = voiceDialogCharacters.filterNot { it === assignment }
+                                }
+                            )
+                        }
+                        item {
+                            Button(
+                                onClick = {
+                                    voiceDialogCharacters = voiceDialogCharacters + VoiceAssignment(
+                                        name = "",
+                                        selectedVoice = voiceOptions.firstOrNull() ?: "",
+                                        enabled = true
+                                    )
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Add character")
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = { cancelCharacterVoiceDialog() }) {
+                            Text("Cancel")
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        TextButton(onClick = { saveCharacterVoiceDialog() }) {
+                            Text("Save")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private data class VoiceAssignment(
+    var name: String,
+    var selectedVoice: String,
+    var enabled: Boolean = true
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CharacterVoiceEditorRow(
+    assignment: VoiceAssignment,
+    voiceOptions: List<String>,
+    onNameChange: (String) -> Unit,
+    onVoiceChange: (String) -> Unit,
+    onRemove: () -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedTextField(
+            value = assignment.name,
+            onValueChange = { onNameChange(it.uppercase()) },
+            label = { Text("Character") },
+            singleLine = true,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = !expanded },
+            modifier = Modifier.weight(1f)
+        ) {
+            OutlinedTextField(
+                value = assignment.selectedVoice,
+                onValueChange = { onVoiceChange(it) },
+                label = { Text("Voice") },
+                singleLine = true,
+                readOnly = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor(),
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) }
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
+                if (voiceOptions.isEmpty()) {
+                    DropdownMenuItem(
+                        text = { Text("Default") },
+                        onClick = {
+                            onVoiceChange("Default")
+                            expanded = false
+                        }
+                    )
+                } else {
+                    voiceOptions.forEach { voice ->
+                        DropdownMenuItem(
+                            text = { Text(voice) },
+                            onClick = {
+                                onVoiceChange(voice)
+                                expanded = false
+                            }
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        IconButton(
+            onClick = onRemove,
+            modifier = Modifier.size(40.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Delete,
+                contentDescription = "Remove character",
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(18.dp)
+            )
+        }
     }
 }
 
