@@ -52,6 +52,8 @@ import com.brokenshotgun.runlines.domain.model.Script
 import com.brokenshotgun.runlines.R
 import com.brokenshotgun.runlines.ui.components.LineEditRow
 import com.brokenshotgun.runlines.ui.reader.playback.ReadSceneTTSListener
+import com.brokenshotgun.runlines.ui.review.InAppReviewCoordinator
+import com.brokenshotgun.runlines.ui.review.ReviewPromptPolicy
 import java.util.Locale
 import com.brokenshotgun.runlines.ui.reader.playback.TtsPlaybackController
 
@@ -105,6 +107,7 @@ fun ReadSceneScreen(
     val activeScriptId by rememberUpdatedState(scriptState.id)
     val readerActive = remember(script.id) { mutableStateOf(true) }
     var currentLineIndex by remember { mutableIntStateOf(-1) }
+    var sceneReadStartedAtBeginning by remember { mutableStateOf(false) }
     var isPlaying by remember { mutableStateOf(false) }
     var mutedLineDelayJob by remember { mutableStateOf<Job?>(null) }
     var stopAtSceneEnd by remember { mutableStateOf(false) }
@@ -268,6 +271,7 @@ fun ReadSceneScreen(
         textToSpeech?.stop()
         isPlaying = false
         currentLineIndex = -1
+        sceneReadStartedAtBeginning = false
         TtsPlaybackController.setPlayingState(
             context = context,
             title = scriptState.name.ifBlank { untitledScriptLabel },
@@ -285,6 +289,7 @@ fun ReadSceneScreen(
         }
         selectedSceneIndex = index
         currentLineIndex = -1
+        sceneReadStartedAtBeginning = false
         editingLineIndex = null
         resetSceneEditHistory()
     }
@@ -479,6 +484,7 @@ fun ReadSceneScreen(
         scriptState = updatedScript
         selectedSceneIndex = insertionIndex
         currentLineIndex = -1
+        sceneReadStartedAtBeginning = false
         resetSceneEditHistory()
         sceneHeadingLocation = ""
         insertSceneBeforeCurrent = false
@@ -499,6 +505,7 @@ fun ReadSceneScreen(
         scriptState = updatedScript
         selectedSceneIndex = deletedSceneIndex.coerceAtMost(updatedScript.scenes.lastIndex.coerceAtLeast(0))
         currentLineIndex = -1
+        sceneReadStartedAtBeginning = false
         exitEditMode()
         resetSceneEditHistory()
         showDeleteSceneDialog = false
@@ -566,6 +573,7 @@ fun ReadSceneScreen(
                 pushUndoState(beforeSnapshot)
                 sceneRedoStack = emptyList()
                 scriptState = updatedScript
+                sceneReadStartedAtBeginning = false
                 if (editingLineIndex == sourceIndex) editingLineIndex = destinationIndex
                 currentLineIndex = when {
                     currentLineIndex == sourceIndex -> destinationIndex
@@ -857,7 +865,10 @@ fun ReadSceneScreen(
         }
 
         if (targetLineIndex < targetScene.lines.size) {
-            selectedSceneIndex = validSceneIndex
+            if (selectedSceneIndex != validSceneIndex) {
+                selectedSceneIndex = validSceneIndex
+                sceneReadStartedAtBeginning = targetLineIndex == 0
+            }
             currentLineIndex = targetLineIndex
             val line = targetScene.lines[targetLineIndex]
             if (
@@ -880,10 +891,23 @@ fun ReadSceneScreen(
                             val completedScene = scriptState.scenes.getOrNull(validSceneIndex) ?: return@launch
                             if (targetLineIndex + 1 < completedScene.lines.size) {
                                 speakLineAt(validSceneIndex, targetLineIndex + 1)
-                            } else if (!stopAtSceneEnd && validSceneIndex + 1 < scriptState.scenes.size) {
-                                speakLineAt(validSceneIndex + 1, 0)
                             } else {
-                                stopPlayback()
+                                val sceneCompleted = ReviewPromptPolicy.isCompletedSceneRead(
+                                    completedLineIndex = targetLineIndex,
+                                    lineCount = completedScene.lines.size,
+                                    startedAtBeginning = sceneReadStartedAtBeginning
+                                )
+                                if (sceneCompleted) {
+                                    InAppReviewCoordinator.recordCompletedScene(context)
+                                }
+                                if (!stopAtSceneEnd && validSceneIndex + 1 < scriptState.scenes.size) {
+                                    speakLineAt(validSceneIndex + 1, 0)
+                                } else {
+                                    stopPlayback()
+                                    if (sceneCompleted) {
+                                        InAppReviewCoordinator.requestIfEligible(context)
+                                    }
+                                }
                             }
                         }
                     }
@@ -969,6 +993,9 @@ fun ReadSceneScreen(
         } else {
             isPlaying = true
             val startIndex = if (currentLineIndex == -1) 0 else currentLineIndex
+            if (currentLineIndex == -1) {
+                sceneReadStartedAtBeginning = true
+            }
             TtsPlaybackController.setPlayingState(
                 context = context,
                 title = scriptState.name.ifBlank { untitledScriptLabel },
@@ -1103,7 +1130,22 @@ fun ReadSceneScreen(
                     return@post
                 }
                 activeUtteranceId = null
+                val completedScene = scriptState.scenes.getOrNull(completedSceneIndex)
+                val sceneCompleted = completedScene != null &&
+                    ReviewPromptPolicy.isCompletedSceneRead(
+                        completedLineIndex = completedLineIndex,
+                        lineCount = completedScene.lines.size,
+                        startedAtBeginning = sceneReadStartedAtBeginning
+                    )
+                if (sceneCompleted) {
+                    InAppReviewCoordinator.recordCompletedScene(context)
+                }
+                val playbackWillStop = sceneCompleted &&
+                    (stopAtSceneEnd || completedSceneIndex >= scriptState.scenes.lastIndex)
                 advancePlaybackFromLatest(completedSceneIndex, completedLineIndex)
+                if (playbackWillStop) {
+                    InAppReviewCoordinator.requestIfEligible(context)
+                }
             }
         })
     }
@@ -1365,8 +1407,13 @@ fun ReadSceneScreen(
                                     .sorted(),
                                 onClick = {
                                     if (isPlaying) {
+                                        if (index > currentLineIndex) {
+                                            sceneReadStartedAtBeginning = false
+                                        }
                                         speakLineAt(selectedSceneIndex, index)
                                     } else {
+                                        sceneReadStartedAtBeginning = index == 0 ||
+                                            (sceneReadStartedAtBeginning && index <= currentLineIndex)
                                         currentLineIndex = index
                                     }
                                 },
@@ -1382,6 +1429,7 @@ fun ReadSceneScreen(
                                 onSave = {
                                     saveEditingLineChanges(index, editingActorName, editingLineText)
                                     currentLineIndex = index
+                                    sceneReadStartedAtBeginning = index == 0
                                 },
                                 onCancel = {
                                     cancelEditingLine()
